@@ -26,6 +26,7 @@ def _translate(user_text):
 
 class _Handler(BaseHTTPRequestHandler):
     model = "mock-model"
+    models = ["mock-model"]
 
     def log_message(self, fmt, *args):
         pass
@@ -41,7 +42,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/v1/models"):
             self._json(200, {"object": "list", "data": [
-                {"id": self.model, "object": "model"}]})
+                {"id": name, "object": "model"} for name in self.models]})
+        elif self.path.startswith("/props"):
+            self._json(200, {
+                "total_slots": 4, "model_path": "",
+                "default_generation_settings": {"n_ctx": 8192},
+            })
+        elif self.path.startswith("/slots"):
+            self._json(200, [{}, {}, {}, {}])
         elif self.path.startswith("/health"):
             self._json(200, {"status": "ok"})
         else:
@@ -78,8 +86,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class MockOpenAI(object):
-    def __init__(self, model="mock-model"):
-        handler = type("Handler", (_Handler,), {"model": model})
+    def __init__(self, model="mock-model", models=None):
+        handler = type("Handler", (_Handler,), {
+            "model": model,
+            "models": list(models or [model]),
+        })
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever,
                                        daemon=True)

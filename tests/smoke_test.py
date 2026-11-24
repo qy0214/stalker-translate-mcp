@@ -18,6 +18,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+PLUGIN_ROOT = os.path.join(ROOT, "hermes-plugin")
 sys.path.insert(0, HERE)
 from mock_openai import MockOpenAI  # noqa: E402
 
@@ -35,12 +36,14 @@ class McpClient(object):
         self.log_path = env["STALKER_MCP_STDERR"]
         self.err = open(self.log_path, "wb")
         self.proc = subprocess.Popen(
-            [sys.executable, server_path or os.path.join(ROOT, "server.py")],
+            [sys.executable, server_path or os.path.join(PLUGIN_ROOT, "server.py")],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=self.err, cwd=ROOT, env=env)
+            stderr=self.err, cwd=PLUGIN_ROOT, env=env)
         self.q = queue.Queue()
         threading.Thread(target=self._reader, daemon=True).start()
         self._id = 0
+        self.elicitations = []
+        self.server_logs = []
 
     def _reader(self):
         for line in self.proc.stdout:
@@ -71,6 +74,23 @@ class McpClient(object):
                 raise TimeoutError("等待 %s 响应超时（%ds）" % (method, timeout))
             item = self.q.get(timeout=remain)
             resp = json.loads(item.decode("utf-8"))
+            if (resp.get("method") == "elicitation/create"
+                    and resp.get("id") is not None):
+                self.elicitations.append(resp)
+                props = (resp.get("params", {}).get("requestedSchema", {})
+                         .get("properties", {}))
+                content = {}
+                if (props.get("model", {}).get("enum")):
+                    content["model"] = props["model"]["enum"][0]
+                if (props.get("parallel", {}).get("enum")):
+                    content["parallel"] = props["parallel"]["enum"][0]
+                self._write({"jsonrpc": "2.0", "id": resp["id"],
+                             "result": {"action": "accept",
+                                        "content": content}})
+                continue
+            if resp.get("method") == "notifications/message":
+                self.server_logs.append(resp.get("params") or {})
+                continue
             if resp.get("id") == msg_id:
                 return resp
 
@@ -104,14 +124,16 @@ def result_json(resp):
 
 def main():
     tmp = tempfile.mkdtemp(prefix="stalker_mcp_smoke_")
-    mock = MockOpenAI("mock-model").start()
+    mock = MockOpenAI("Hy-MT2-1.8B-Q8_0", [
+        "Hy-MT2-1.8B-Q8_0", "Hy-MT2-7B-Q4_K_M"]).start()
     cfg_path = os.path.join(tmp, "config.json")
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump({
             "base_url": mock.base_url,
-            "model": "mock-model",
+            "model": "Hy-MT2-1.8B-Q8_0",
             "ctx_size": 4096,
             "parallel": 1,
+            "open_progress_page": False,
             "timeout_sec": 60,
         }, f)
     mod_dir = os.path.join(tmp, "mod", "text")
@@ -134,12 +156,15 @@ def main():
     try:
         init = client.request("initialize", {
             "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "smoke", "version": "1"},
+            "capabilities": {"elicitation": {}},
+            "clientInfo": {"name": "hermes-agent", "version": "1"},
         })
         check("initialize 返回 serverInfo",
               (init.get("result") or {}).get("serverInfo", {}).get("name")
               == "stalker-translate", init.get("result"))
+        check("initialize 版本 1.1.9",
+              (init.get("result") or {}).get("serverInfo", {}).get("version")
+              == "1.1.9", init.get("result"))
         client.notify("notifications/initialized")
 
         tools = client.request("tools/list")
@@ -170,10 +195,32 @@ def main():
              "arguments": {"input_dir": os.path.join(tmp, "mod")}},
             timeout=600))
         elapsed = time.time() - t0
+        check("translate_mod 弹窗选择路数",
+              bool(client.elicitations)
+              and client.elicitations[0].get("params", {}).get(
+                  "requestedSchema", {}).get("properties", {}).get(
+                      "parallel", {}).get("enum"),
+              [e.get("params", {}).get("message", "")[:80]
+               for e in client.elicitations])
+        check("translate_mod 弹窗选择模型",
+              bool(client.elicitations)
+              and len(client.elicitations[0].get("params", {}).get(
+                  "requestedSchema", {}).get("properties", {}).get(
+                      "model", {}).get("enum", [])) >= 2,
+              [e.get("params", {}).get("message", "")[:120]
+               for e in client.elicitations])
         check("translate_mod 正常结束", mod.get("status") == "done", mod)
+        check("translate_mod 使用所选路数", mod.get("parallel") == 1,
+              mod.get("parallel"))
+        check("translate_mod 发送 MCP 日志通知",
+              bool(client.server_logs), client.server_logs[:2])
         out_xml = os.path.join(tmp, "mod", "translated_hy_mt2", "text",
                                "st_hello.xml")
         check("输出文件已生成", os.path.isfile(out_xml), out_xml)
+        check("实时进度页已生成",
+              os.path.isfile(os.path.join(tmp, "mod", "translated_hy_mt2",
+                                          ".progress.html")),
+              os.path.join(tmp, "mod", "translated_hy_mt2", ".progress.html"))
         body = ""
         if os.path.isfile(out_xml):
             with open(out_xml, encoding="utf-8-sig") as f:
