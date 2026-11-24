@@ -33,7 +33,7 @@ LOG_DIR = os.path.join(HERE, "logs")
 CONFIG_PATH = (os.environ.get("STALKER_MCP_CONFIG")
                or os.path.join(HERE, "config.json"))
 SERVER_NAME = "stalker-translate"
-VERSION = "1.1.9"
+VERSION = "1.1.10"
 
 DEFAULT_CONFIG = {
     # OpenAI 兼容端点。默认按 llama.cpp 的 8080；Hermes 安装脚本会写入它的
@@ -184,7 +184,8 @@ def _write_progress_page(path, d, pairs, status="running", elapsed=0.0, note="")
 
     state_label = {"running": "翻译中", "done": "已完成", "error": "出错",
                    "stopped": "已停止", "paused": "已暂停",
-                   "stopping": "正在停止"}.get(status, status)
+                   "stopping": "正在停止",
+                   "needs_review": "待复核"}.get(status, status)
 
     denom = max(translatable, translated)
     if phase == "prescan" and scan_total > 0:
@@ -1114,11 +1115,37 @@ def tool_translate_text(args):
     try:
         out = eng.translate(text, src, tgt, glossary_hits=hints or None,
                             context=str(args.get("context") or "") or None)
+        quality_issues = []
+        if out == text and plugin._has_translatable_text(text):
+            quality_issues.append("模型未产生可用译文")
+        if not plugin.runtime_tokens_match(text, out):
+            out = eng.translate(text, src, tgt, glossary_hits=hints or None,
+                                extra_sys=plugin._PLACEHOLDER_RETRY_NOTE)
+            if not plugin.runtime_tokens_match(text, out):
+                quality_issues.append("颜色码/占位符未能原样保留")
+        if tgt == "chs":
+            role_issues = plugin.semantic_role_issues(text, out, src)
+            if role_issues:
+                out = eng.translate(text, src, tgt, glossary_hits=hints or None,
+                                    extra_sys=plugin._SEMANTIC_ROLE_NOTE)
+                role_issues = plugin.semantic_role_issues(text, out, src)
+                if role_issues:
+                    quality_issues.extend(role_issues)
+        if not plugin.runtime_tokens_match(text, out):
+            if "颜色码/占位符未能原样保留" not in quality_issues:
+                quality_issues.append("颜色码/占位符未能原样保留")
+            out = text
+        elif quality_issues:
+            out = text
     except Exception as e:
         raise ToolError("翻译请求失败：%s: %s。%s"
                         % (type(e).__name__, e, _endpoint_hint(cfg)))
-    return {"translation": out, "source": text, "model": eng.model,
-            "term_hits": [[k, v] for k, v in (hints or [])]}
+    result = {"translation": out, "source": text, "model": eng.model,
+              "term_hits": [[k, v] for k, v in (hints or [])]}
+    if quality_issues:
+        result["retained_source"] = True
+        result["quality_issues"] = quality_issues
+    return result
 
 
 def _endpoint_hint(cfg):
@@ -1329,9 +1356,10 @@ def tool_translate_mod(args):
         parallel=parallel)
     t0 = time.time()
     error = ""
+    job_ok = False
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            job.run()
+            job_ok = bool(job.run())
     except Exception as e:
         error = "%s: %s" % (type(e).__name__, e)
         _log("翻译任务异常：\n" + traceback.format_exc())
@@ -1339,7 +1367,17 @@ def tool_translate_mod(args):
     watcher_stop.set()
     eng.pause_event = None
     eng.stop_event = None
-    status = "stopped" if stop_event.is_set() else ("error" if error else "done")
+    audit = getattr(job, "audit_result", None)
+    failed_strings = int(getattr(job, "failed_strings", 0) or 0)
+    audit_bad = bool(audit and not audit.get("ok"))
+    if stop_event.is_set():
+        status = "stopped"
+    elif error:
+        status = "error"
+    elif not job_ok or failed_strings or audit_bad:
+        status = "needs_review"
+    else:
+        status = "done"
     _write_status(status)
     try:
         _write_progress_page(progress_page, last_state["d"], list(eng.recent),
@@ -1356,7 +1394,8 @@ def tool_translate_mod(args):
         "elapsed_sec": round(elapsed, 1),
         "requests": int(getattr(job, "req_count", 0) or 0),
         "translated_chars": int(getattr(job, "trans_chars", 0) or 0),
-        "failed_strings": int(getattr(job, "failed_strings", 0) or 0),
+        "failed_strings": failed_strings,
+        "audit": audit,
         "files": (job.batch_stats or {}).get("batches"),
         "model": eng.model,
         "parallel": parallel,
@@ -1377,6 +1416,9 @@ def tool_translate_mod(args):
     if status == "stopped":
         result["hint"] = ("已停止。重新运行同一命令会从断点继续，"
                           "已完成文件会自动跳过。")
+    if status == "needs_review":
+        result["hint"] = ("处理已结束，但终检或翻译失败统计未通过；"
+                          "请查看 audit 和 log_tail，修正后重新运行续译。")
     if warns:
         result["warnings"] = warns[-10:]
     return result
@@ -1408,7 +1450,9 @@ TOOLS = [
                         "自动检测显卡/显存与端点槽位，列出可用的翻译模型（1.8B/7B）"
                         "和 1..N 路及理由让用户选择。"
                         "结果写入 output_dir（默认输入目录下的 translated_hy_mt2），"
-                        "可重复运行续译。"),
+                        "可重复运行续译。只有 status=done 表示通过终检；"
+                        "needs_review 表示已有输出但存在硬性问题，"
+                        "必须报告待复核并查看 audit/log_tail。"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1502,7 +1546,9 @@ def _handle(msg):
             "instructions": ("STALKER 汉化翻译。用户要汉化 MOD 时直接调用 "
                              "translate_mod（input_dir=用户给的目录）；不要先用 "
                              "terminal/execute_code 扫描目录。parallel 省略会弹窗让"
-                             "用户选择翻译模型和并发路数。只有翻译报错时才调用 check_env。"
+                             "用户选择翻译模型和并发路数。只有 status=done 才能报告"
+                             "翻译完成；needs_review 必须报告待复核并引用 audit/log_tail。"
+                             "只有翻译报错时才调用 check_env。"
                              "只翻译一段文本用 translate_text。本机是 Windows，"
                              "路径形如 C:\\Users\\...，不要使用 /Users/ 或 /home/。"),
         })

@@ -7,10 +7,10 @@
 
 - 仓库：<https://github.com/qy0214/stalker-localization-toolkit-ai-translate-2x>
 - 许可证：GPL-3.0
-- 同步的版本：`kernel/plugin.py` 的 `PLUGIN_INFO["version"]`（2.0.27）
-- 相对主仓库的唯一修改：推理请求的 `model` 字段改为可配置
-  （`getattr(self, "model_name", "hy-mt2")`），供 OpenAI 兼容端点使用。
-  同步脚本 `tools/sync_kernel.py` 会在复制后自动重新应用该修改。
+- 同步的基线版本：`kernel/plugin.py` 的 `PLUGIN_INFO["version"]`（2.0.28）
+- MCP 派生改动：推理请求的 `model` 字段改为可配置
+  （`getattr(self, "model_name", "hy-mt2")`），并增加 Hermes 所需的零变化文件清理、
+  生成字符串 ID 中断落盘、运行期占位符保真、任务语义方向门禁和硬性交付终检。
 
 ## 2. wzyddg/stalker_auto-trans-tool_remake — X-Ray 解析器
 

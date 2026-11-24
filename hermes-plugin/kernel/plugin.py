@@ -49,11 +49,12 @@ import tempfile
 import shutil
 import atexit
 import urllib.parse
+from collections import Counter
 
 PLUGIN_INFO = {
     "id": "ai_translate",
     "name": "AI 离线翻译（Hy-MT2 / 自选模型）",
-    "version": "2.0.27",
+    "version": "2.0.28",
     "repo": "https://github.com/qy0214/stalker-localization-toolkit-ai-translate-2x",
     "description": "本地离线模型翻译 X-Ray 文本；解压即用、零环境依赖；"
                    "混元两档内置模型自动测速下载；支持自选任意 GGUF 模型；"
@@ -1088,7 +1089,9 @@ TRANSLATION_SYS_PROMPT = (
     "sgtat_gen_text_1_x、a.b.c）、\\n；疑似代码或标记一律照抄勿译；\n"
     "2. 人名、阵营、地名、怪物、武器物品等专名使用游戏约定译名，"
     "前后统一，不另译、不音译成多个版本；\n"
-    "3. 忠实完整，不增译、不漏译、不脑补剧情；\n"
+    "3. 忠实完整，不增译、不漏译、不脑补剧情；任务和对话必须保持"
+    "施事者、受事者、付款人与收款人，原文谁做、谁给、谁付、谁收，"
+    "译文就原样对应，禁止反转人物关系；\n"
     "4. 粗话、脏话、辱骂、威胁、黑色幽默与残酷描写一律按原意直译，"
     "保留同等粗鲁力度与情绪强度：不得弱化、省略、删除或改写成书面语、"
     "委婉语（дерьмо 就是「屎／狗屎」，不是「糟糕」；заткнись 就是「闭嘴」，"
@@ -1142,7 +1145,9 @@ TRANSLATION_SYS_PROMPT_EN = (
     "有官方中文名的用官方名，没有的按常见音译，首次出现后保持统一；"
     "缩写、型号、代号（AK-74、PDA、SEVA）保留原文，不要硬造中文；\n"
     "3. 忠实完整，不增译、不漏译、不脑补剧情；英语的冠词、助动词、"
-    "重复主语不要逐词搬进中文；\n"
+    "重复主语不要逐词搬进中文；任务和对话必须保持施事者、受事者、"
+    "付款人与收款人，原文谁做、谁给、谁付、谁收，译文就原样对应，"
+    "禁止反转人物关系；\n"
     "4. 粗话、脏话、辱骂、俚语、威胁、黑色幽默与残酷描写一律按原意直译，"
     "保留同等粗鲁力度与情绪强度：不得弱化、省略、删除或改写成书面语、"
     "委婉语（fuck 就是「操／妈的」，shit 就是「屎／狗屎」，不是「糟糕」；"
@@ -1204,7 +1209,8 @@ TRANSLATION_BATCH_SYS_PROMPT = (
     "上下文里前后句只帮助理解，不要翻译没有编号的内容。"
     "术语提示只在语义相符时采用；引号内的阵营、地名、物品、人名也要译成中文。"
     "输入里的 $$R0$$、$$R1$$ 等控制符必须逐字原样保留，不得翻译、"
-    "拆分或改动。"
+    "拆分或改动。每行还要保持原句的施事者、受事者、付款人和收款人，"
+    "不得把人物关系或交接方向反转。"
     "只输出带编号的译文行。"
 )
 
@@ -3835,6 +3841,77 @@ def restore_runtime_tokens(text, mapping):
     return text
 
 
+def runtime_token_counts(text):
+    return Counter(_RUNTIME_TOKEN_RE.findall(text or ""))
+
+
+def runtime_tokens_match(source, output):
+    return runtime_token_counts(source) == runtime_token_counts(output)
+
+
+_SEMANTIC_ROLE_NOTE = (
+    "这是任务或对话，必须严格保持施事者、受事者、付款人和收款人："
+    "原文谁做、谁给、谁付、谁收，中文就原样对应，禁止把「我/你」"
+    "或人物关系反转，也不得把相邻条目内容串进来。"
+)
+
+
+def semantic_role_issues(source, output, lang=""):
+    """返回可确定性识别的人称/交接方向冲突。"""
+    src = re.sub(r"\s+", " ", source or "").strip()
+    dst = re.sub(r"\s+", " ", output or "").strip()
+    if not src or not dst:
+        return []
+    low = src.lower()
+    issues = []
+    src_first = bool(re.search(
+        r"(?<![a-zа-яё])(?:i|me|my|mine|we|us|our|я|мне|меня|мой|мы|нам|нас)"
+        r"(?![a-zа-яё])", low))
+    src_second = bool(re.search(
+        r"(?<![a-zа-яё])(?:you|your|yours|ты|тебе|тебя|твой|вы|вам|вас)"
+        r"(?![a-zа-яё])", low))
+    dst_first = bool(re.search(r"我|我们|咱", dst))
+    dst_second = bool(re.search(r"你|你们|您", dst))
+    if src_first and not src_second and dst_second and not dst_first:
+        issues.append("人称从第一方反转成第二方")
+    if src_second and not src_first and dst_first and not dst_second:
+        issues.append("人称从第二方反转成第一方")
+
+    def _direction(text, language):
+        s = text.lower()
+        if language == "eng" or re.search(r"[a-z]", s):
+            if re.search(r"\b(?:i|we)\s+(?:will\s+)?(?:pay|give|bring|hand)\s+you\b", s):
+                return "1_to_2"
+            if re.search(r"\byou\s+(?:(?:must|should|need to|have to)\s+)?"
+                         r"(?:pay|give|bring|hand)\s+(?:me|us)\b", s):
+                return "2_to_1"
+            if re.search(r"\b(?:give|bring|hand)\s+(?:me|us)\b", s):
+                return "2_to_1"
+        if re.search(r"\bя\s+(?:(?:должен|должна|должно)\s+)?"
+                     r"(?:заплачу|заплатить|дам|дать|принесу|принести|"
+                     r"отдам|отдать)\s+тебе\b", s):
+            return "1_to_2"
+        if re.search(r"\bты\s+(?:(?:должен|должна|должно|должны)\s+)?"
+                     r"(?:заплатишь|заплатить|дашь|дать|принесешь|принести|"
+                     r"отдашь|отдать)\s+мне\b", s):
+            return "2_to_1"
+        if re.search(r"\b(?:отнеси|принеси|отдай)\s+мне\b", s):
+            return "2_to_1"
+        if re.search(r"我(?:会|将|要)?(?:付给|交给|带给)你", text):
+            return "1_to_2"
+        if re.search(r"你(?:必须|需要|要)?(?:付给我|交给我|带给我)", text):
+            return "2_to_1"
+        if re.search(r"(?:付给我|交给我|带给我)", text):
+            return "2_to_1"
+        return ""
+
+    src_dir = _direction(src, lang)
+    dst_dir = _direction(dst, "zh")
+    if src_dir and dst_dir and src_dir != dst_dir:
+        issues.append("交接/付款方向反转")
+    return issues
+
+
 # ★ 2.0.24（IWP 全量审计 D10）：半音译粘连签名。模型（1.8B）会把专名
 # 音译一半、原文留一半，产出「克里门enko队长」「Tkachenko将军」
 # 「$clr_2We正看到」「箱子-kit在那儿」这类玩家不可读、词库回填也救不回
@@ -5234,9 +5311,9 @@ class TranslationJob(object):
         self._unresolved = {}        # id -> 次数（索引里找不到）
         self._localization = {"language": "", "files": []}
         self._lang_hint = ""
-        self.log = log or (lambda m: None)
-        self.detail = detail or (lambda m: None)
-        self.progress = progress or (lambda d: None)
+        self.log = log or (lambda *args, **kwargs: None)
+        self.detail = detail or (lambda *args, **kwargs: None)
+        self.progress = progress or (lambda *args, **kwargs: None)
         self.cancel = cancel_event
         # 自动识别出的「整个 MOD 待翻译文件总数」，用于界面计数显示
         self.pending_files = int(pending_files or 0)
@@ -5258,6 +5335,8 @@ class TranslationJob(object):
         self.redundant = []
         self.failed_strings = 0
         self.empty_files = 0
+        self._quality_issues = []
+        self.audit_result = None
         self._past = set()
         self._temp_clock = 0
         self.out_dir = out_dir or os.path.join(in_dir, "translated_hy_mt2")
@@ -5634,6 +5713,36 @@ class TranslationJob(object):
                  "warn")
 
     def _translate_one(self, text, lang, context="", style="dialogue"):
+        out = self._translate_one_unchecked(text, lang, context, style)
+        if out == text and _has_translatable_text(text):
+            self.failed_strings += 1
+            self._rule_hit("译文无变化", "kept_source")
+            self._quality_issues.append("%s：模型未产生可用译文" % str(text)[:60])
+            self.detail("  译文无实际变化，保留原文：%s" % str(text)[:60])
+            return text
+        if not runtime_tokens_match(text, out):
+            self.failed_strings += 1
+            self._rule_hit("出口占位符保真", "kept_source")
+            self.detail("  出口占位符被改动，保留原文：%s" % str(text)[:60])
+            return text
+        issues = semantic_role_issues(text, out, lang)
+        if issues:
+            retry = self._translate_one_unchecked(
+                text, lang, "", style, extra_note=_SEMANTIC_ROLE_NOTE)
+            if (retry != text and runtime_tokens_match(text, retry)
+                    and not semantic_role_issues(text, retry, lang)):
+                self._rule_hit("任务语义方向", "retried_ok")
+                return retry
+            self.failed_strings += 1
+            self._rule_hit("任务语义方向", "kept_source")
+            self._quality_issues.append("%s：%s" % (str(text)[:60],
+                                                     "、".join(issues)))
+            self.detail("  任务语义方向冲突，保留原文：%s" % str(text)[:60])
+            return text
+        return out
+
+    def _translate_one_unchecked(self, text, lang, context="", style="dialogue",
+                                 extra_note=""):
         """翻译一个文本串；运行期占位符先 mask，译后校验并回填。
 
         校验失败（模型改了/丢了 `$name`、`%s`、`\n` 等）时**保留原文**，
@@ -5665,9 +5774,9 @@ class TranslationJob(object):
         normalized = unescape_newlines(text)
         masked, mapping = mask_runtime_tokens(normalized)
         if not mapping:
-            out = self._translate_plain(normalized, lang)
+            out = self._translate_plain(normalized, lang, note=extra_note)
         else:
-            out = self._translate_plain(masked, lang)
+            out = self._translate_plain(masked, lang, note=extra_note)
             restored = restore_runtime_tokens(out, mapping)
             if restored is None:
                 # 颜色控制符（%c[...]）在带术语提示的请求里偶发被模型
@@ -6734,11 +6843,21 @@ class TranslationJob(object):
                 "in_size": ist.st_size,
                 "in_mtime_ns": ist.st_mtime_ns,
                 "out_size": ost.st_size,
+                "pipeline": PLUGIN_INFO["version"],
             }
             # 每文件全量重写是 O(n²)（几千文件时写放大明显）；5 秒节流，
             # 崩溃最多让最近几秒的文件下次重译（不会漏、不会错）。
             if time.time() - self._ledger_saved > 5:
                 self._save_ledger()
+
+    def _discard_unchanged_output(self, rel, out_path):
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except OSError:
+            pass
+        with self._ledger_lock:
+            self._ledger.pop(rel.replace("\\", "/"), None)
 
     def _output_covers_input(self, full, out_path):
         """输出 XML 是否包含输入的全部 string id（用于旧输出版本迁移）。"""
@@ -6754,6 +6873,38 @@ class TranslationJob(object):
             return False
         return {e.id for e in in_ents} <= {e.id for e in out_ents}
 
+    def _text_value_pairs(self, src_e, out_e):
+        pairs = []
+        for lang_key, out_val in (out_e.texts or {}).items():
+            if lang_key in (src_e.texts or {}):
+                pairs.append((lang_key, src_e.texts[lang_key], out_val))
+        if pairs:
+            return pairs
+        _src_lang, src_val = self.p.getRecommendLangText(src_e, self.tgt)
+        _out_lang, out_val = self.p.getRecommendLangText(out_e, self.tgt)
+        if src_val is not None and out_val is not None:
+            return [("text", src_val, out_val)]
+        return []
+
+    def _text_output_has_changes(self, full, out_path):
+        try:
+            in_ents = self._parse(self.p.parse_xray_text_xml, full,
+                                  read_encoding_chain(full))
+            out_ents = self._parse(self.p.parse_xray_text_xml, out_path,
+                                   read_encoding_chain(out_path))
+        except Exception:
+            return False
+        out_map = {e.id: e for e in (out_ents or [])}
+        for ent in (in_ents or []):
+            other = out_map.get(ent.id)
+            if other is None:
+                continue
+            if any(src_val != out_val
+                   for _lang, src_val, out_val in self._text_value_pairs(
+                       ent, other)):
+                return True
+        return False
+
     def _should_skip(self, rel, full, out_path, kind):
         """该文件是否可以跳过（= 输入未变且输出完整）。"""
         if not os.path.isfile(out_path):
@@ -6768,6 +6919,12 @@ class TranslationJob(object):
                 and ent.get("in_size") == ist.st_size
                 and ent.get("in_mtime_ns") == ist.st_mtime_ns
                 and ent.get("out_size") == ost.st_size):
+            if kind == "text" and not self._text_output_has_changes(full, out_path):
+                self._discard_unchanged_output(rel, out_path)
+                return False
+            if ent.get("pipeline") != PLUGIN_INFO["version"]:
+                self.detail("  翻译管线已升级，重新处理：%s" % rel)
+                return False
             return True
         if self._ledger_present:
             # 有账本 = 严格模式：没记录过的输出一律重做（可能是中断残留，
@@ -6776,7 +6933,11 @@ class TranslationJob(object):
         # 首次升级：早期输出没有账本。文本按"输出是否覆盖输入 id"
         # 判断（能识别缺新条目/半截 XML），其余格式退回 mtime 判断。
         if kind == "text":
-            ok = self._output_covers_input(full, out_path)
+            ok = (self._output_covers_input(full, out_path)
+                  and self._text_output_has_changes(full, out_path))
+            if not ok and self._output_covers_input(full, out_path):
+                self._discard_unchanged_output(rel, out_path)
+                return False
         else:
             ok = ost.st_mtime >= ist.st_mtime and ost.st_size > 0
         if ok:
@@ -6799,29 +6960,7 @@ class TranslationJob(object):
                     pass
 
     def _final_audit(self, done_dir):
-        """终检（2.0.2）：整 MOD 交付前的全量复核，只报告、不删改。
-
-        分层口径 —— 与逐条校验互补，不重复：
-          ① **账本在盘**：账本里的每个输出文件存在且非空（原子写之外的第二道
-             兜底；账号 out_size>0 而盘上为 0 = 异常）。
-          ② **文本表可解析 + ID 全保留**：本次改写过的文本表（_audit_tables）
-             逐张解析输出 XML；解析失败 = 表坏；输出缺输入里已有的 string id
-             = 漏条目。原样复制的文件不验结构（复制不改内容）。
-          ③ **掩码残留**：$$R0$$ 形态是送翻时的临时掩码，正常成品不该出现
-             （restore 失败整条回退原文）；扫到即点名"疑似"让人复核。
-          ④ **条目未翻译**（2.0.7）：改写过的文本表里，输出仍与源文逐字相同
-             且含西里尔——这是"保留原文"的落盘形态（翻译异常/专名跳过）。
-             排除已登记专名/术语库既有条目后即疑似漏译，点名让人补。
-          ⑤ **上下文串入**（2.0.8）：输出仍带「前一句/后一句」标签 = 译文
-             被相邻条目污染，点名补译。
-          ⑥ **& 保真哨兵**（2.0.22）：第三方产物见过 `Heckler & Koch` →
-             `Heckler  Koch` 的静默吞 &（& 位置塌成双空格）。本插件解析/
-             写回链路已验证往返保真（normalize 转义裸 & + generateOutputXml
-             再转义），残余风险只剩模型译文吞 &；源含 & 且译文出现源没有
-             的双空格即点名复核，只报告不删改。
-        终检不通过不影响已有输出、不改 ok —— 账本续跑机制下次会补漏重译。
-        范围：文本表 XML（数量最大的产出）。脚本字面层/引用层复制件走 ①。
-        """
+        """整 MOD 交付前的强制终检；返回结构化结果并决定完成状态。"""
         with self._ledger_lock:
             ledger_items = list(self._ledger.items())
         missing, empty = [], []
@@ -6838,7 +6977,14 @@ class TranslationJob(object):
         untranslated = []          # ★ 2.0.7 条目级漏译（输出=俄文源文）
         ctx_bleed = []             # ★ 2.0.8 上下文串入（前一句/后一句标签）
         amp_lost = []              # ★ 2.0.22 & 保真哨兵（源含 & 译文双空格）
+        token_bad = []
+        semantic_bad = []
+        term_bad = []
+        unchanged_outputs = []
+        dangling_ids = []
         _CYR_AUDIT = re.compile(r"[а-яёА-ЯЁ]{2,}")
+        _LATIN_AUDIT = re.compile(r"[A-Za-z]{2,}")
+        _GEN_ID_RE = re.compile(r"sgtat_gen_text_\d+_\d+")
         for rel in sorted(self._audit_tables):
             n_tables += 1
             out = os.path.join(done_dir, rel.replace("/", os.sep))
@@ -6864,22 +7010,65 @@ class TranslationJob(object):
                     # 排除已登记专名（词库命中）——那是有意保留，不是漏译。
                     in_map = {e.id: e for e in (in_ents or [])}
                     hits = []
+                    token_ids = []
+                    semantic_ids = []
+                    term_ids = []
+                    file_changed = False
                     for e in (out_ents or []):
                         src_e = in_map.get(e.id)
                         if src_e is None:
                             continue
-                        for lang_key, out_val in (e.texts or {}).items():
-                            in_val = (src_e.texts or {}).get(lang_key)
+                        for lang_key, in_val, out_val in self._text_value_pairs(
+                                src_e, e):
                             if not in_val or not out_val:
                                 continue
                             if in_val != out_val:
-                                continue          # 改过 = 已翻
-                            if not _CYR_AUDIT.search(in_val):
-                                continue          # 非俄文源（英文等）另算
+                                file_changed = True
+                                if not runtime_tokens_match(in_val, out_val):
+                                    token_ids.append(e.id)
+                                if semantic_role_issues(
+                                        in_val, out_val, lang_key):
+                                    semantic_ids.append(e.id)
+                                for _start, _end, key in self._glossary_spans(
+                                        in_val):
+                                    expected = str(self.glossary.get(key) or "")
+                                    expected = expected.strip(
+                                        "\"'«»“”‘’")
+                                    if expected and expected not in out_val:
+                                        term_ids.append(e.id)
+                                        break
+                                continue
+                            if not (_CYR_AUDIT.search(in_val)
+                                    or _LATIN_AUDIT.search(in_val)):
+                                continue
+                            if not _has_translatable_text(in_val):
+                                continue
                             if termbase_lookup(in_val) is not None:
-                                continue          # 词库条目：有意保留
+                                continue
+                            if (looks_like_code_or_debug(rel, in_val)
+                                    or looks_like_technical_text(in_val)
+                                    or (looks_like_identifier_text(in_val)
+                                        and not is_player_facing_label(
+                                            rel, in_val)
+                                        and not _id_player_visible(e.id))):
+                                continue
+                            if (self.protect_proper
+                                    and looks_like_proper_text(rel, in_val)):
+                                continue
                             hits.append(e.id)
                             break
+                    if token_ids:
+                        token_bad.append("%s（%d 条：%s…）" % (
+                            rel, len(token_ids), ", ".join(token_ids[:3])))
+                    if semantic_ids:
+                        semantic_bad.append("%s（%d 条：%s…）" % (
+                            rel, len(semantic_ids),
+                            ", ".join(semantic_ids[:3])))
+                    if term_ids:
+                        term_bad.append("%s（%d 条：%s…）" % (
+                            rel, len(term_ids), ", ".join(term_ids[:3])))
+                    if out_ents and not file_changed:
+                        unchanged_outputs.append(rel)
                     if hits:
                         untranslated.append("%s（%d 条：%s…）"
                                             % (rel, len(hits),
@@ -6904,12 +7093,12 @@ class TranslationJob(object):
                         src_e = in_map.get(e.id)
                         if src_e is None:
                             continue
-                        for lang_key, out_val in (e.texts or {}).items():
-                            in_val = (src_e.texts or {}).get(lang_key)
+                        for _lang_key, in_val, out_val in self._text_value_pairs(
+                                src_e, e):
                             if not in_val or not out_val or in_val == out_val:
-                                continue          # 未翻/空值不看
+                                continue
                             if "&" not in in_val:
-                                continue          # 源无 & 不看
+                                continue
                             if "  " in out_val and "  " not in in_val:
                                 amp_ids.append(e.id)
                                 break
@@ -6925,39 +7114,106 @@ class TranslationJob(object):
                 raw = ""
             if _MASK_RESIDUE_RE.search(raw or ""):
                 residue.append(rel)
-        problems = (len(missing) + len(empty) + len(bad_parse)
-                    + len(lost_ids) + len(residue) + len(untranslated)
-                    + len(ctx_bleed) + len(amp_lost))
-        if problems:
-            self.log("终检：账本 %d 个文件 / 改写文本表 %d 张，发现 %d 处问题"
-                     % (len(ledger_items), n_tables, problems), "warn")
-            for rel in missing[:10]:
-                self.log("  终检｜账本有记录但输出缺失：%s" % rel, "warn")
-            for rel in empty[:10]:
-                self.log("  终检｜输出为空文件：%s" % rel, "warn")
-            for rel in bad_parse[:10]:
-                self.log("  终检｜文本表解析失败：%s" % rel, "warn")
-            for rel in lost_ids[:10]:
-                self.log("  终检｜输出疑似漏条目：%s" % rel, "warn")
-            for rel in residue[:10]:
-                self.log("  终检｜疑似未还原掩码（$$R…）：%s" % rel, "warn")
-            for rel in untranslated[:20]:
-                self.log("  终检｜条目未翻译（保留俄文）：%s" % rel, "warn")
-            for rel in ctx_bleed[:20]:
-                self.log("  终检｜上下文串入（前一句/后一句）：%s" % rel,
-                         "warn")
-            for rel in amp_lost[:20]:
-                self.log("  终检｜疑似吞 &（& 塌成双空格）：%s" % rel, "warn")
-            if untranslated or ctx_bleed:
-                self.log("  终检｜上述条目只点名前 20 张表；"
-                         "可清空输出目录后重跑补译", "warn")
-            if problems > 40:
-                self.log("  终检｜其余问题只点名前 40 处，其余见详细日志",
+        defined_ids = set()
+        referenced_ids = {}
+        for root, dirs, files in os.walk(done_dir):
+            dirs[:] = [d for d in dirs if d != "__temp__"]
+            for fn in files:
+                low = fn.lower()
+                if not low.endswith((".xml", ".ltx", ".script")):
+                    continue
+                path = os.path.join(root, fn)
+                rel = os.path.relpath(path, done_dir)
+                if low.endswith(".xml") and (
+                        "put_this_to_text_folder" in low
+                        or low == "sgtat_auto_texts.xml"):
+                    try:
+                        ents = self._parse(
+                            self.p.parse_xray_text_xml, path,
+                            read_encoding_chain(path))
+                        defined_ids.update(e.id for e in (ents or []) if e.id)
+                    except Exception:
+                        pass
+                    continue
+                try:
+                    raw = read_text_any(path)
+                except Exception:
+                    continue
+                for gid in set(_GEN_ID_RE.findall(raw or "")):
+                    referenced_ids.setdefault(gid, []).append(rel)
+        for gid in sorted(set(referenced_ids) - defined_ids):
+            dangling_ids.append("%s（%s）" % (
+                gid, ", ".join(referenced_ids[gid][:3])))
+        details = {
+            "missing_files": missing,
+            "empty_files": empty,
+            "unparseable_tables": bad_parse,
+            "missing_ids": lost_ids,
+            "mask_residue": residue,
+            "untranslated_entries": untranslated,
+            "context_bleed": ctx_bleed,
+            "runtime_token_damage": token_bad,
+            "semantic_role_conflicts": semantic_bad,
+            "glossary_conflicts": term_bad,
+            "unchanged_outputs": unchanged_outputs,
+            "dangling_generated_ids": dangling_ids,
+            "amp_warnings": amp_lost,
+        }
+        hard_keys = [k for k, v in details.items() if k != "amp_warnings"]
+        counts = {k: len(v) for k, v in details.items()}
+        counts.update({"ledger_files": len(ledger_items),
+                       "text_tables": n_tables,
+                       "amp_warnings": len(amp_lost)})
+        hard_problems = sum(counts[k] for k in hard_keys)
+        warnings = len(amp_lost)
+        retry_files = set()
+        for key in hard_keys:
+            for item in details[key]:
+                retry_files.add(item.split("（", 1)[0])
+        for gid in set(referenced_ids) - defined_ids:
+            retry_files.update(referenced_ids[gid])
+        if retry_files:
+            with self._ledger_lock:
+                for rel in retry_files:
+                    self._ledger.pop(rel.replace("\\", "/"), None)
+            self._save_ledger()
+        result = {
+            "ok": hard_problems == 0,
+            "hard_problems": hard_problems,
+            "warnings": warnings,
+            "counts": counts,
+            "details": details,
+        }
+        self.audit_result = result
+        if hard_problems or warnings:
+            self.log("终检：账本 %d 个文件 / 改写文本表 %d 张，"
+                     "硬性问题 %d 处，警告 %d 处"
+                     % (len(ledger_items), n_tables, hard_problems, warnings),
+                     "warn")
+            for key, label in (
+                    ("missing_files", "账本有记录但输出缺失"),
+                    ("empty_files", "输出为空文件"),
+                    ("unparseable_tables", "文本表解析失败"),
+                    ("missing_ids", "输出疑似漏条目"),
+                    ("mask_residue", "疑似未还原掩码（$$R…）"),
+                    ("runtime_token_damage", "颜色码/占位符损坏"),
+                    ("semantic_role_conflicts", "任务/对话语义方向冲突"),
+                    ("glossary_conflicts", "硬术语译名缺失或不一致"),
+                    ("unchanged_outputs", "整张输出无实际译文变化"),
+                    ("dangling_generated_ids", "生成字符串 ID 缺少定义"),
+                    ("untranslated_entries", "条目未翻译（保留原文）"),
+                    ("context_bleed", "上下文串入（前一句/后一句）"),
+                    ("amp_warnings", "疑似吞 &（& 塌成双空格）")):
+                for item in details[key][:20]:
+                    self.log("  终检｜%s：%s" % (label, item), "warn")
+            if hard_problems > 40:
+                self.log("  终检｜其余问题只点名前 40 处，完整计数见返回结果",
                          "warn")
         else:
-            self.log("终检通过：账本 %d 个文件、改写文本表 %d 张全部可解析，"
-                     "无缺失/漏条目/掩码残留" % (len(ledger_items), n_tables),
-                     "ok")
+            self.log("终检通过：账本 %d 个文件、改写文本表 %d 张，"
+                     "无悬空 ID/零变化输出/占位符损坏/漏译/语义方向冲突"
+                     % (len(ledger_items), n_tables), "ok")
+        return result
 
     def run(self):
         done_dir = self._resolve_done_dir(self.out_dir)
@@ -7058,6 +7314,7 @@ class TranslationJob(object):
                 if failed:
                     self.log("有 %d 个文件处理失败（已跳过，其余照常完成），"
                              "详见日志" % failed, "warn")
+                    ok = False
             else:
                 ok = self._run_recursive(done_dir, reuse)
         finally:
@@ -7072,13 +7329,27 @@ class TranslationJob(object):
                     self.log("已清理 %d 个空目录" % removed)
 
         # ★ 2.0.2 终检：整 MOD 交付前的最后一道闸。逐条校验（占位符 mask/
-        #   校验/回填、失败保留原文）在翻译时就做了，这里验收"整面墙"——
-        #   只报告不删改；取消/部分完成时也跑（报告的就是已落盘的部分）。
+        #   校验、失败保留原文）在翻译时就做了，这里验收"整面墙"。
+        #   硬性问题会阻止任务报告为完成；取消时仍检查已落盘部分。
+        self.audit_result = None
+        audit_failed = False
         if not (self.reference_mode and self.preview_reference):
             try:
-                self._final_audit(done_dir)
+                self.audit_result = self._final_audit(done_dir)
+                if not self.audit_result.get("ok"):
+                    ok = False
             except Exception as e:
-                self.log("终检未完成（不影响已生成的输出）：%s: %s"
+                audit_failed = True
+                ok = False
+                self.audit_result = {
+                    "ok": False,
+                    "hard_problems": 1,
+                    "warnings": 0,
+                    "counts": {"audit_error": 1},
+                    "details": {"audit_error": [
+                        "%s: %s" % (type(e).__name__, e)]},
+                }
+                self.log("终检未完成，任务不得标记为完成：%s: %s"
                          % (type(e).__name__, e), "warn")
 
         # ★ 2.0.3 提示词体检：规则违规遥测汇总，为提示词迭代提供数据。
@@ -7087,10 +7358,21 @@ class TranslationJob(object):
         except Exception:
             pass
 
-        self.log("全部完成：请求 %d 段，%s 字符%s" %
-                 (self.req_count, _fmt_size(self.trans_chars),
-                  ("，超长文本自动分句 %d 次" % self.long_chunks)
-                  if self.long_chunks else ""))
+        if self.failed_strings:
+            ok = False
+        if ok:
+            self.log("全部完成：请求 %d 段，%s 字符%s" %
+                     (self.req_count, _fmt_size(self.trans_chars),
+                      ("，超长文本自动分句 %d 次" % self.long_chunks)
+                      if self.long_chunks else ""))
+        else:
+            reason = "终检未通过" if audit_failed or (
+                self.audit_result and not self.audit_result.get("ok")) else (
+                    "已取消" if self._cancelled() else "存在处理失败")
+            self.log("处理结束，未标记为完成（%s）：请求 %d 段，%s 字符；"
+                     "已落盘内容保留，请核对终检结果后续跑"
+                     % (reason, self.req_count, _fmt_size(self.trans_chars)),
+                     "warn")
         if self.tm_stats.get("scope") != "off" or self.tm_stats.get("hits"):
             self.log("TM-lite：%s，精确复用 %d 条，节省 %s 字符"
                      % ("跨表" if self.tm_stats.get("scope") == "global"
@@ -7534,7 +7816,7 @@ class TranslationJob(object):
                  "脚本/XML 字面文本：改写 %d 个文件 / %d 条"
                  % (changed, copied, copied_refs, translated, skipped, failed,
                     lit["files"], lit["entries"]), "ok")
-        return True
+        return failed == 0 and not self._cancelled()
 
     def _run_literal_layer(self, done_dir):
         """把脚本/XML 里**不是 ID** 的字面文本抽到新表并注册。
@@ -7761,6 +8043,12 @@ class TranslationJob(object):
                 x["src"], text, xlang)
             if self._entry_style(x["rel"], x["src"]) == "dialogue":
                 text = style_cleanup_cn(text)
+            if not runtime_tokens_match(x["src"], text):
+                self.batch_stats["failed"] += 1
+                return {}
+            if semantic_role_issues(x["src"], text, xlang):
+                self.batch_stats["failed"] += 1
+                return {}
             if (not text or not has_cjk(text)
                     or text.strip() == x["src"].strip()
                     or looks_like_prompt_echo(text)
@@ -7787,11 +8075,8 @@ class TranslationJob(object):
                 on_progress(1, 1, 0)
             return st
         if not ents:
-            self._copy_file(full, out_path)
-            st["copied"] = True
-            self._record_done(rel, full, out_path)
-            if on_progress:
-                on_progress(1, 1, 0)
+            self._discard_unchanged_output(rel, out_path)
+            st["skipped_file"] = True
             return st
         # 多路并发时表级 TM 的 _tm_local_enabled/_tm_cache 是实例状态，
         # 会被其他 worker 覆盖；只保留任务级全局 TM（在并发前已算好）。
@@ -8014,9 +8299,8 @@ class TranslationJob(object):
             st["translated"] += 1
         _emit(total_entries, force=True)
         if not changes:
-            self._copy_file(full, out_path)
-            st["copied"] = True
-            self._record_done(rel, full, out_path)
+            self._discard_unchanged_output(rel, out_path)
+            st["skipped_file"] = True
             return st
         try:
             open(full, "rb").read().decode("utf-8-sig")
@@ -8250,6 +8534,36 @@ class TranslationJob(object):
         """文件类型判定（转发到模块级 classify_xray_file，与勘察共用一处口径）。"""
         return classify_xray_file(full, rel)
 
+    def _flush_generated_ids(self, done_dir, extract, chars_all=None,
+                             name="___auto_put_this_to_text_folder.xml"):
+        data = dict(extract or {})
+        chars = set(chars_all or ())
+        if "chars_all_in" in data:
+            chars |= data.pop("chars_all_in")
+        path = os.path.join(done_dir, name)
+        if os.path.isfile(path):
+            try:
+                old = self._parse(self.p.parse_xray_text_xml, path,
+                                  read_encoding_chain(path))
+                for ent in (old or []):
+                    _lang, value = self.p.getRecommendLangText(ent, self.tgt)
+                    if not value:
+                        values = [v for v in (ent.texts or {}).values() if v]
+                        value = values[0] if values else ""
+                    if value:
+                        data.setdefault(ent.id, value)
+            except Exception:
+                pass
+        if chars:
+            text = "".join(chars)
+            for i, piece in enumerate(
+                    self.p.splitTextToPiecesAtLength(text, 500)):
+                data["text_gen_for_font_%d" % i] = piece
+        if data:
+            self._write_atomic(
+                path,
+                lambda p: self.p.generateOutputXml(p, data, splitLength=1000))
+
     def _run_auto(self, done_dir, reuse):
         temp_dir = os.path.join(done_dir, "__temp__")
         os.makedirs(temp_dir, exist_ok=True)
@@ -8281,6 +8595,7 @@ class TranslationJob(object):
         trans_files = 0
         for idx, (kind, rel, full) in enumerate(targets, 1):
             if self._cancelled():
+                self._flush_generated_ids(done_dir, extract, chars_all)
                 self.log("已取消，已完成文件保留在输出目录")
                 return False
             out_path = os.path.join(done_dir, rel)
@@ -8341,22 +8656,14 @@ class TranslationJob(object):
                                 p, whole_text, needXmlHeader=False))
                     written += 1
                     self._record_done(rel, full, out_path)
+                    self._flush_generated_ids(done_dir, extract, chars_all)
 
-        if "chars_all_in" in extract:
-            del extract["chars_all_in"]
-        if chars_all:
-            chars = "".join(chars_all)
-            for i, pie in enumerate(self.p.splitTextToPiecesAtLength(chars, 500)):
-                extract["text_gen_for_font_%d" % i] = pie
-        if extract:
-            self._write_atomic(
-                os.path.join(done_dir, "___auto_put_this_to_text_folder.xml"),
-                lambda p: self.p.generateOutputXml(p, extract, splitLength=1000))
+        self._flush_generated_ids(done_dir, extract, chars_all)
         self.log("已写出文件 %d 个（镜像原目录结构，格式保持不变）" % written)
         if failed:
             self.log("有 %d 个文件处理失败（已跳过，其余照常完成），详见日志"
                      % failed, "warn")
-        return True
+        return failed == 0
 
     def _flush_temp(self, temp_path, done):
         """把当前进度写进 __temp__：取消/中断后重跑可直接复用已译部分。"""
@@ -8425,7 +8732,7 @@ class TranslationJob(object):
                         or looks_like_generated_noise(full, src0)
                         or looks_like_technical_text(src0)
                         or (looks_like_identifier_text(src0)
-                            and not is_player_facing_label(rel, src0)
+                            and not is_player_facing_label(full, src0)
                             and not _id_player_visible(meta["id"]))):
                     return False
                 if self.only_referenced and meta["id"] not in self._ref_counts:
@@ -8482,6 +8789,17 @@ class TranslationJob(object):
                     and self._looks_like_target(src):
                 done[ent.id] = src
             elif src:
+                if (not _has_translatable_text(src)
+                        or looks_like_code_or_debug(full, src)
+                        or looks_like_generated_noise(full, src)
+                        or looks_like_technical_text(src)
+                        or (looks_like_identifier_text(src)
+                            and not is_player_facing_label(full, src)
+                            and not _id_player_visible(ent.id))
+                        or (self.protect_proper
+                            and looks_like_proper_text(full, src))):
+                    done[ent.id] = src
+                    continue
                 use_lang = self.src_lang if self.src_lang != "auto" else lang
                 # 字段名不可靠：不少 MOD 把英语放进 <rus>，或把俄语放进 <text>。
                 # 自动模式下按本条正文的字母构成覆盖字段判断。
@@ -8517,9 +8835,22 @@ class TranslationJob(object):
             except OSError:
                 pass
             return 0
+        changed = any(
+            ent.id in done and any(
+                value != done[ent.id]
+                for value in (ent.texts or {}).values()
+                if value is not None)
+            for ent in texts)
+        if not changed:
+            rel = os.path.relpath(full, self.in_dir)
+            self._discard_unchanged_output(rel, out_path)
+            self.detail("  无实际译文变化，跳过输出：%s" % rel)
+            return 0
+        rel = os.path.relpath(full, self.in_dir)
         self._write_atomic(
             out_path,
             lambda p: self.p.generateOutputXml(p, done, splitLength=1000))
+        self._audit_tables.add(rel)
         self.progress({"file": fn, "ids": len(texts), "total_ids": len(texts),
                        "file_idx": idx, "files": total, "reqs": self.req_count,
                        "unit": "个文件"})
@@ -8578,6 +8909,9 @@ class TranslationJob(object):
         failed = 0
         for idx, full in enumerate(targets, 1):
             if self._cancelled():
+                self._flush_generated_ids(
+                    done_dir, extract,
+                    name="___%s__put_this_to_text_folder.xml" % self.mode)
                 self.log("已取消")
                 return False
             rel = os.path.relpath(full, self.in_dir)
@@ -8609,20 +8943,16 @@ class TranslationJob(object):
                         lambda p: self.p.generateOutputFileFromString(
                             p, whole_text, needXmlHeader=False))
                 self._record_done(rel, full, out_path)
-        if self.mode == "scriptL" and "chars_all_in" in extract:
-            chars = "".join(extract["chars_all_in"])
-            extract.clear()
-            for i, pie in enumerate(self.p.splitTextToPiecesAtLength(chars, 500)):
-                extract["text_gen_for_font_%d" % i] = pie
-        if extract:
-            self._write_atomic(
-                os.path.join(done_dir, "___%s__put_this_to_text_folder.xml"
-                             % self.mode),
-                lambda p: self.p.generateOutputXml(p, extract, splitLength=1000))
+                self._flush_generated_ids(
+                    done_dir, extract,
+                    name="___%s__put_this_to_text_folder.xml" % self.mode)
+        self._flush_generated_ids(
+            done_dir, extract,
+            name="___%s__put_this_to_text_folder.xml" % self.mode)
         if failed:
             self.log("有 %d 个文件处理失败（已跳过，其余照常完成），详见日志"
                      % failed, "warn")
-        return True
+        return failed == 0
 
     def _process_non_text(self, full, reuse, extract, prefix, gen):
         chain = read_encoding_chain(full)

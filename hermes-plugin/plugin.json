@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "stalker-translate",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "description": "STALKER / X-Ray MOD 汉化：把文本 XML、cfgxml、ltx、脚本批量译成简体中文，自动套用术语库。",
   "author": {
     "name": "qy0214"

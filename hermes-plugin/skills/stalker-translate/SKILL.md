@@ -1,6 +1,6 @@
 ---
 name: stalker-translate
-version: 1.1.9
+version: 1.1.10
 description: "汉化 STALKER / X-Ray 的 MOD：把 MOD 目录里的文本 XML、cfgxml、ltx、脚本批量译成简体中文，自动套用内置术语库（阵营/地点/变异生物/物品/人物）。用户说“翻译这个 MOD”“汉化这个目录”“把这段 STALKER 文本译成中文”时使用。"
 license: GPL-3.0
 ---
@@ -27,7 +27,9 @@ license: GPL-3.0
 1. 用户消息里通常已经带 MOD 路径（例如 `C:\Users\Admin\Desktop\IWP`），直接使用它。
 2. 立即调用 `translate_mod`，只传 `input_dir`；省略 `parallel`，工具弹窗会让你选择翻译模型（1.8B/7B）和并发路数。
 3. 工具运行期间不要重复调用，等待结果。
-4. 结束后汇报：输出目录、文件数、失败数、实际路数、实际使用的翻译模型。
+4. 结束后先看 `status`：只有 `done` 才能报告“翻译完成”；`needs_review` 必须
+   报告“待复核”，并说明 `failed_strings`、`audit` 和 `log_tail` 中的问题。
+5. 正常完成时汇报：输出目录、文件数、失败数、实际路数、实际使用的翻译模型。
 
 ## 硬性禁止
 
