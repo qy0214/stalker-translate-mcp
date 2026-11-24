@@ -79,6 +79,11 @@ Write-Step "技能已复制到：$SkillsDir"
 
 # ── 4. 生成 config.json（首次安装才写；读 Hermes 的本地模型端点）──
 $CfgPath = Join-Path $SkillsDir "config.json"
+$ApiKeyFile = Join-Path $HermesHome "runtimes\llamacpp\.api_key"
+$ApiKey = ""
+if (Test-Path $ApiKeyFile) {
+    $ApiKey = (Get-Content -LiteralPath $ApiKeyFile -Raw).Trim()
+}
 if (-not (Test-Path $CfgPath)) {
     $BaseUrl = "http://127.0.0.1:18434/v1"
     $ModelName = "local-model"
@@ -102,7 +107,7 @@ if (-not (Test-Path $CfgPath)) {
     }
     $cfg = [ordered]@{
         base_url = $BaseUrl
-        api_key = ""
+        api_key = $ApiKey
         model = $ModelName
         ctx_size = 8192
         parallel = 1
@@ -117,6 +122,19 @@ if (-not (Test-Path $CfgPath)) {
     Write-Step "已生成 config.json：$BaseUrl（模型：$ModelName）"
 } else {
     Write-Step "保留已有 config.json：$CfgPath"
+    if ($ApiKey) {
+        try {
+            $obj = Get-Content -LiteralPath $CfgPath -Raw | ConvertFrom-Json
+            if (-not $obj.api_key) {
+                $obj | Add-Member -NotePropertyName api_key -NotePropertyValue $ApiKey -Force
+                [System.IO.File]::WriteAllText($CfgPath, ($obj | ConvertTo-Json),
+                    (New-Object System.Text.UTF8Encoding($false)))
+                Write-Step "已补写 Hermes 本地端点的 API Key"
+            }
+        } catch {
+            Write-Step "提示：config.json 无法自动补写 api_key，可手动填写"
+        }
+    }
 }
 
 # ── 5. 注册 MCP 服务到 Hermes config.yaml ─────────────────────────

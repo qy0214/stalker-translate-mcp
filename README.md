@@ -45,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 |---|---|---|
 | `base_url` | `http://127.0.0.1:18434/v1` | OpenAI 兼容端点（安装时自动读取） |
 | `model` | Hermes 当前模型 | 端点上的模型名；llama.cpp 可忽略 |
-| `api_key` | 空 | 端点需要鉴权时填写 |
+| `api_key` | 自动读取 | Hermes 本地端点需要鉴权时，安装脚本从 `runtimes\llamacpp\.api_key` 自动填入 |
 | `ctx_size` | 8192 | 每条文本的上下文预算 |
 | `parallel` | 1 | 并发请求数（对应 llama-server 的 `--parallel`） |
 | `timeout_sec` | 300 | 单次请求超时 |
