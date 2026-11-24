@@ -1,0 +1,12 @@
+{
+  "base_url": "http://127.0.0.1:8080/v1",
+  "api_key": "",
+  "model": "Hy-MT2-1.8B-Q8_0",
+  "ctx_size": 8192,
+  "parallel": 1,
+  "timeout_sec": 300,
+  "prompt_extra": "",
+  "official_prompts": false,
+  "source_lang": "auto",
+  "target_lang": "chs"
+}

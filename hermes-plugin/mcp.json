@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "stalker-translate-plugin": {
+      "type": "stdio",
+      "command": "./runtime/python.exe",
+      "args": ["${PLUGIN_ROOT}/server.py"],
+      "cwd": "${PLUGIN_DATA}",
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  }
+}

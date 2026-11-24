@@ -1,9 +1,10 @@
 {
-  "base_url": "http://127.0.0.1:18434/v1",
+  "base_url": "http://127.0.0.1:8080/v1",
   "api_key": "",
   "model": "local-model",
   "ctx_size": 8192,
   "parallel": 1,
+  "open_progress_page": true,
   "timeout_sec": 300,
   "prompt_extra": "",
   "official_prompts": false,
