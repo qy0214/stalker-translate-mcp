@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# 用户配置与本机运行数据
+config.json
+logs/
+kernel/assets/models/
+kernel/assets/bin/
+kernel/assets/downloads/
+kernel/assets/logs/
+kernel/assets/session_terms/
+kernel/assets/config.json
+kernel/assets/glossary_user.json
