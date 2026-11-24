@@ -1,77 +1,69 @@
-# STALKER 汉化 MCP 技能（Hermes Agent）
+# STALKER MOD 汉化 MCP 插件
 
-把 STALKER / X-Ray MOD 的文本批量译成简体中文，给 **Hermes Agent** 当技能用。
-只提供翻译大脑（术语库 + 提示词 + 翻译管线 + 文件处理），**不集成模型**：
-推理请求发给你自己的 OpenAI 兼容端点（Hermes 部署的本地模型）。
+把 STALKER / X-Ray MOD 批量译成简体中文。项目只交付 **Hermes MCP 插件包**，
+不提供独立 CLI；翻译模型由 Hermes 或用户自己的 OpenAI 兼容端点提供。
 
 ## 安装
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+1. 解压 `stalker-translate-MCP-1.1.9.zip`。
+2. 双击 `install-plugin.cmd`。
+3. 安装器会复制插件、启用工具、安装技能并尝试重启 Hermes 内核。
+4. 看到“安装成功”后重启或重新打开 Hermes，直接说“汉化 D:\mods\你的MOD”。
+
+安装器只依赖 Windows 自带 PowerShell 5.1，不需要单独安装 Python，也不需要管理员权限。
+如果安装时以管理员身份运行，请用普通方式重新打开 Hermes，避免内核权限与桌面端不一致。
+
+## 功能
+
+- `check_env`：检查模型端点、术语库、X-Ray 解析器、显卡与并发路数。
+- `translate_mod`：汉化整个 MOD；首次调用可同时选择 1.8B/7B 模型和并发路数。
+- `translate_text`：翻译一小段文本。
+- 实时进度页、暂停/继续/停止、MCP 日志通知、断点续译。
+- 输出默认写入 `<MOD目录>\translated_hy_mt2`，不覆盖原文件。
+- 选择 7B 时按显存重新收窄并发路数，降低显存不足风险。
+
+## 模型与配置
+
+插件不内置模型。运行时优先读取 Hermes 的本地模型端点、默认模型和 API Key；
+也可以编辑插件目录中的 `config.json`：
+
+```json
+{
+  "base_url": "http://127.0.0.1:8080/v1",
+  "api_key": "",
+  "model": "Hy-MT2-1.8B-Q8_0",
+  "ctx_size": 8192,
+  "parallel": 1,
+  "open_progress_page": true,
+  "timeout_sec": 300
+}
 ```
 
-脚本会：
+本机常用端点是 `http://127.0.0.1:18434/v1`。日常整 MOD 推荐
+`Hy-MT2-1.8B-Q8_0`，`Hy-MT2-7B-Q4_K_M` 语感更好但更慢、更占显存。
 
-1. 复制技能到 `%LOCALAPPDATA%\Hermes\skills\stalker-translate`
-2. 从 Hermes 的 `config.yaml` 读出本地模型端点，生成 `config.json`
-3. 把 MCP 服务注册进 `config.yaml`（先备份）
-
-可重复运行；已有 `config.json` 不会被覆盖。
-
-## 使用
-
-重启 Hermes，按教程启动本地模型，然后直接说：
+## 源码结构
 
 ```text
-汉化 D:\mods\你的MOD
+hermes-plugin/                 1.1.9 主线源码
+  server.py                    MCP stdio 服务
+  kernel/                      翻译内核、术语库、X-Ray 解析器
+  runtime/                     便携 Python
+  skills/stalker-translate/    Hermes 技能
+  install-plugin.ps1           双击安装器
+tests/smoke_test.py            1.1.9 MCP 全流程测试
+package.ps1                    生成分享包
 ```
 
-汉化结果默认写到 `<MOD目录>\translated_hy_mt2`，不会覆盖原文件；
-重复运行会续译（已完成的文件自动跳过）。
-
-## 工具
-
-| 工具 | 说明 |
-|---|---|
-| `check_env` | 检查模型端点、术语库、解析器 |
-| `translate_mod` | 汉化整个 MOD 目录 |
-| `translate_text` | 翻译一小段文本 |
-
-## 配置
-
-`%LOCALAPPDATA%\Hermes\skills\stalker-translate\config.json`：
-
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `base_url` | `http://127.0.0.1:18434/v1` | OpenAI 兼容端点（安装时自动读取） |
-| `model` | Hermes 当前模型 | 端点上的模型名；llama.cpp 可忽略 |
-| `api_key` | 自动读取 | Hermes 本地端点需要鉴权时，安装脚本从 `runtimes\llamacpp\.api_key` 自动填入 |
-| `ctx_size` | 8192 | 每条文本的上下文预算 |
-| `parallel` | 1 | 并发请求数（对应 llama-server 的 `--parallel`） |
-| `timeout_sec` | 300 | 单次请求超时 |
-| `prompt_extra` | 空 | 追加到系统提示词的要求 |
-
-## 目录
-
-```text
-SKILL.md               Hermes 技能说明
-server.py              MCP 服务（零第三方依赖）
-install.ps1            一键安装
-config.example.json    配置模板
-kernel/                翻译内核（plugin.py + 术语库 + X-Ray 解析器）
-tools/sync_kernel.py   从 2.x 主仓库同步内核
-tests/                 冒烟测试（内置 mock 模型端点）
-```
-
-## 开发
+## 开发与打包
 
 ```powershell
-python .\tests\smoke_test.py
+python tests/smoke_test.py
+python -m py_compile hermes-plugin/server.py hermes-plugin/kernel/plugin.py
+powershell -ExecutionPolicy Bypass -File .\package.ps1 -OutDir "C:\Users\Admin\Desktop"
 ```
 
-会启动一个本地 mock 模型端点，走完 `initialize → tools/list →
-check_env → translate_text → translate_mod` 全流程。
-
-内核来自
+进度记录见 [docs/progress/STATUS.md](docs/progress/STATUS.md)。
+翻译内核来自
 [stalker-localization-toolkit-ai-translate-2x](https://github.com/qy0214/stalker-localization-toolkit-ai-translate-2x)
-（GPL-3.0），同步方式见 `tools/sync_kernel.py`。
+（GPL-3.0）。
