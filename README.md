@@ -1,3 +1,11 @@
+> **【已归档 · ARCHIVED】本仓库已并入五合一单仓库（monorepo），新地址：**
+> **https://github.com/qy0214/stalker-localization-toolkit-ai-translate-2x**
+>
+> Hermes MCP 插件现由上库 `products/mcp_hermes/` 统一维护与发布（当前 1.1.10，
+> 与本库最后版本一致）；共享解析核 `core/stalker_translate_core` 亦在上库单源管理。
+> 本仓库自即日起只读归档，不再接受 issue / PR / 新版本发布；新功能、缺陷修复
+> 与新版本请一律到上述单仓库。
+
 # STALKER MOD 汉化 MCP 插件
 
 把 STALKER / X-Ray MOD 批量译成简体中文。项目只交付 **Hermes MCP 插件包**，
